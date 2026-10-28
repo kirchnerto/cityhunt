@@ -1,7 +1,7 @@
 // Straßenjagd – Service Worker: App offline verfügbar, Kartenkacheln zwischenspeichern
-const SHELL = 'shell-v1';
+const SHELL = 'shell-v2';
 const LIBS = 'libs-v1';
-const TILES = 'tiles-v1';
+const TILES = 'tiles-v2';
 const SHELL_FILES = ['./', './index.html', './core.js', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
 const MAX_TILES = 4000;
 
@@ -35,11 +35,13 @@ self.addEventListener('fetch', e => {
     e.respondWith(caches.open(LIBS).then(c => c.match(req).then(hit => hit || fetch(req).then(res => { if (res.ok || res.type === 'opaque') c.put(req, res.clone()); return res; }))));
     return;
   }
-  // Kartenkacheln: aus dem Cache, im Hintergrund auffrischen
-  if (/basemaps\.cartocdn\.com/.test(url.host)) {
-    e.respondWith(caches.open(TILES).then(c => c.match(req).then(hit => {
-      const net = fetch(req).then(res => { if (res.ok || res.type === 'opaque') { c.put(req, res.clone()); if (Math.random() < 0.02) trimTiles(); } return res; });
-      return hit || net;
-    })));
+  // Kartenkacheln (OpenStreetMap): einmal geladen, aus dem Cache – schont die OSM-Server
+  if (url.host === 'tile.openstreetmap.org') {
+    e.respondWith(caches.open(TILES).then(c => c.match(req.url).then(hit => hit ||
+      fetch(req.url, { mode: 'cors', credentials: 'omit' }).then(res => {
+        if (res.ok) { c.put(req.url, res.clone()); if (Math.random() < 0.02) trimTiles(); }
+        return res;
+      }).catch(() => fetch(req))
+    )));
   }
 });

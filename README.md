@@ -32,7 +32,7 @@ Jede Straße in Würzburg einmal zu Fuß laufen. Die App zeichnet Spaziergänge 
 
 ## Datenschutz
 
-Spaziergänge werden nur im Speicher von Chrome auf deinem Handy gespeichert. Es gibt keinen Server und kein Konto. Straßendaten kommen von der Overpass-API (OpenStreetMap), Kartenbilder von CARTO.
+Spaziergänge werden nur im Speicher von Chrome auf deinem Handy gespeichert. Es gibt keinen Server und kein Konto. Straßendaten kommen von der Overpass-API (OpenStreetMap), Kartenbilder ebenfalls von OpenStreetMap.
 
 **Wichtig:** Wenn du in Chrome die Websitedaten löschst, sind auch die Spaziergänge weg. Deshalb ab und zu unter *Fortschritt → Backup speichern* sichern. Mit *Backup laden* holst du sie zurück, auch auf ein neues Handy.
 

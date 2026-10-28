@@ -69,6 +69,8 @@ button { cursor: pointer; }
 
 #map { position: fixed; inset: 0; background: var(--bg); }
 .leaflet-container { font-family: var(--f-body); background: var(--bg); }
+.leaflet-tile-pane { filter: grayscale(1) contrast(.85) brightness(1.08) opacity(.55); }
+@media (prefers-color-scheme: dark) { .leaflet-tile-pane { filter: grayscale(1) invert(1) contrast(.8) brightness(.75) opacity(.6); } }
 .leaflet-control-attribution { font-size: 10px; background: color-mix(in srgb, var(--surface) 80%, transparent) !important; color: var(--muted); }
 .leaflet-control-attribution a { color: var(--muted); }
 .leaflet-popup-content-wrapper, .leaflet-popup-tip { background: var(--surface); color: var(--ink); box-shadow: var(--shadow); }
@@ -468,7 +470,7 @@ function initMap() {
   map = L.map('map', { zoomControl: false, preferCanvas: true, attributionControl: true }).setView([49.7913, 9.9534], 14);
   map.attributionControl.setPrefix(false);
   setBase();
-  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { setBase(); drawStreets(); });
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => drawStreets());
   freshLayer = L.layerGroup().addTo(map);
   districtLayer = L.layerGroup().addTo(map);
   map.on('dragstart', () => { if (S.walk) { follow = false; $('#centerBtn').hidden = false; } });
@@ -484,9 +486,9 @@ function initMap() {
   });
 }
 function setBase() {
-  if (base) map.removeLayer(base);
-  base = L.tileLayer(`https://{s}.basemaps.cartocdn.com/${isDark() ? 'dark_all' : 'light_all'}/{z}/{x}/{y}{r}.png`, {
-    subdomains: 'abcd', maxZoom: 20, attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>-Mitwirkende © <a href="https://carto.com/attributions">CARTO</a>'
+  if (base) return;
+  base = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19, attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>-Mitwirkende'
   }).addTo(map);
 }
 function pieceLL(p) {
