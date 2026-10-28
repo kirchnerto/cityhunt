@@ -19,7 +19,7 @@
 
   function overpassQuery(cityName) {
     const types = STREET_TYPES.concat(PATH_TYPES).join('|');
-    return '[out:json][timeout:180];' +
+    return '[out:json][timeout:120];' +
       'rel["boundary"="administrative"]["admin_level"="6"]["name"="' + cityName + '"]->.c;' +
       '.c out geom;' +
       '.c map_to_area->.city;' +

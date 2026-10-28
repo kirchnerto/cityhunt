@@ -346,7 +346,7 @@ section { display: flex; flex-direction: column; gap: 10px; }
 const C = window.StreetCore;
 const $ = s => document.querySelector(s);
 const CITY = 'Würzburg';
-const OVERPASS = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter', 'https://maps.mail.ru/osm/tools/overpass/api/interpreter'];
+const OVERPASS = ['https://overpass-api.de/api/interpreter', 'https://overpass.private.coffee/api/interpreter', 'https://maps.mail.ru/osm/tools/overpass/api/interpreter', 'https://overpass.kumi.systems/api/interpreter'];
 const nf1 = new Intl.NumberFormat('de-DE', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 const nf0 = new Intl.NumberFormat('de-DE', { maximumFractionDigits: 0 });
 const fmtKm = m => nf1.format(m / 1000) + ' km';
@@ -400,26 +400,47 @@ const level = () => S.settings.level && S.model.levelsAvailable.includes(S.setti
 // ---------- Straßendaten laden ----------
 async function downloadData(onMsg) {
   const body = 'data=' + encodeURIComponent(C.overpassQuery(CITY));
-  let lastErr;
-  for (const url of OVERPASS) {
-    try {
-      onMsg('Verbinde mit ' + new URL(url).host + ' …');
-      const res = await fetch(url, { method: 'POST', body, headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
-      if (!res.ok) throw new Error('Server antwortet mit ' + res.status);
-      let text;
-      if (res.body && res.body.getReader) {
-        const reader = res.body.getReader(); const chunks = []; let n = 0;
-        for (;;) { const { done, value } = await reader.read(); if (done) break; chunks.push(value); n += value.length; onMsg('Lade Straßendaten … ' + nf1.format(n / 1048576) + ' MB'); }
-        const all = new Uint8Array(n); let o = 0; for (const c of chunks) { all.set(c, o); o += c.length; }
-        text = new TextDecoder().decode(all);
-      } else text = await res.text();
-      onMsg('Verarbeite Straßen …'); await idle();
-      const json = JSON.parse(text);
-      if (json.remark && !(json.elements || []).length) throw new Error(json.remark);
-      return C.compactFromOverpass(json, CITY);
-    } catch (e) { lastErr = e; }
+  const fails = [];
+  for (let round = 0; round < 2; round++) {
+    for (const url of OVERPASS) {
+      const host = new URL(url).host;
+      const ctrl = new AbortController();
+      const t0 = Date.now(); let lastData = Date.now(), phase = 'connect', n = 0;
+      // Zeitlimits: 60 s bis zur Antwort, danach höchstens 30 s ohne neue Daten
+      const watch = setInterval(() => {
+        const s = Math.round((Date.now() - t0) / 1000);
+        if (phase === 'connect') {
+          onMsg(`Frage ${host} an … ${s} s` + (fails.length ? ` (vorher: ${fails[fails.length - 1]})` : ''));
+          if (Date.now() - t0 > 60000) ctrl.abort();
+        } else if (Date.now() - lastData > 30000) ctrl.abort();
+      }, 1000);
+      try {
+        onMsg(`Frage ${host} an …`);
+        const res = await fetch(url, { method: 'POST', body, signal: ctrl.signal, headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+        if (!res.ok) throw new Error(res.status === 429 ? 'zu viele Anfragen' : res.status >= 500 ? `überlastet (${res.status})` : `Fehler ${res.status}`);
+        phase = 'load';
+        let text;
+        if (res.body && res.body.getReader) {
+          const reader = res.body.getReader(); const chunks = [];
+          for (;;) { const { done, value } = await reader.read(); if (done) break; chunks.push(value); n += value.length; lastData = Date.now(); onMsg(`Lade Straßendaten von ${host} … ${nf1.format(n / 1048576)} MB`); }
+          const all = new Uint8Array(n); let o = 0; for (const c of chunks) { all.set(c, o); o += c.length; }
+          text = new TextDecoder().decode(all);
+        } else text = await res.text();
+        clearInterval(watch);
+        onMsg('Verarbeite Straßen …'); await idle();
+        const json = JSON.parse(text);
+        if (json.remark && /runtime error|timed out|out of memory/i.test(json.remark)) throw new Error('Server-Zeitlimit');
+        return C.compactFromOverpass(json, CITY);
+      } catch (e) {
+        clearInterval(watch);
+        const why = e.name === 'AbortError' ? 'keine Antwort' : (e instanceof TypeError ? 'nicht erreichbar' : (e.message || String(e)));
+        fails.push(`${host}: ${why}`);
+        if (/Stadtgrenze/.test(why)) throw e;
+      }
+    }
+    if (round === 0) { for (let w = 20; w > 0; w--) { onMsg(`Alle Server ausgelastet. Neuer Versuch in ${w} s …`); await new Promise(r => setTimeout(r, 1000)); } }
   }
-  throw lastErr || new Error('Keine Verbindung');
+  throw new Error('Die OpenStreetMap-Server sind gerade überlastet (' + fails.slice(-4).join(', ') + '). In ein paar Minuten nochmal versuchen.');
 }
 
 // ---------- Neuberechnung ----------
@@ -810,7 +831,7 @@ $('#loadBtn').addEventListener('click', async () => {
     const lv = S.model.defaultLevel;
     toast(`${fmtKm(S.stats.totalM)} Straßen${lv ? ' in ' + S.model.data.levels[lv].length + ' Gebieten' : ''} geladen. Los geht's!`, 4000);
   } catch (e) {
-    msg.textContent = 'Laden fehlgeschlagen: ' + (e.message || e) + ' Bitte Internetverbindung prüfen und nochmal versuchen.';
+    msg.textContent = 'Laden fehlgeschlagen: ' + (e.message || e);
     msg.classList.add('error');
   } finally { btn.disabled = false; }
 });
