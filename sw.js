@@ -1,5 +1,5 @@
 // Straßenjagd – Service Worker: App offline verfügbar, Kartenkacheln zwischenspeichern
-const SHELL = 'shell-v2';
+const SHELL = 'shell-v3';
 const LIBS = 'libs-v1';
 const TILES = 'tiles-v2';
 const SHELL_FILES = ['./', './index.html', './core.js', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
@@ -24,7 +24,7 @@ self.addEventListener('fetch', e => {
 
   // Eigene Dateien: erst Netz (damit Updates ankommen), sonst Cache
   if (url.origin === location.origin) {
-    e.respondWith(fetch(req).then(res => {
+    e.respondWith(fetch(req, { cache: 'no-cache' }).then(res => {
       if (res.ok) { const copy = res.clone(); caches.open(SHELL).then(c => c.put(req, copy)); }
       return res;
     }).catch(() => caches.match(req, { ignoreSearch: true }).then(r => r || caches.match('./index.html'))));

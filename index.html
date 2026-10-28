@@ -320,6 +320,7 @@ section { display: flex; flex-direction: column; gap: 10px; }
         <label class="btn small ghost" for="importInput">Backup laden</label>
         <input id="importInput" type="file" accept=".json,application/json" hidden>
         <button id="refreshBtn" class="btn small ghost">Straßendaten aktualisieren</button>
+        <button id="dataExportBtn" class="btn small ghost">Straßendaten als Datei</button>
       </div>
       <p class="muted" id="dataInfo"></p>
     </section>
@@ -400,6 +401,15 @@ const countedLen = list => list.reduce((a, i) => a + (counts(S.model.pieces[i]) 
 const level = () => S.settings.level && S.model.levelsAvailable.includes(S.settings.level) ? S.settings.level : S.model.defaultLevel;
 
 // ---------- Straßendaten laden ----------
+async function bundledData(onMsg) {
+  try {
+    onMsg('Lade Straßendaten …');
+    const res = await fetch('wuerzburg.json', { cache: 'no-cache' });
+    if (!res.ok) return null;
+    const d = await res.json();
+    return d && d.version === 1 && Array.isArray(d.ways) && d.ways.length ? d : null;
+  } catch (e) { return null; }
+}
 async function downloadData(onMsg) {
   const body = 'data=' + encodeURIComponent(C.overpassQuery(CITY));
   const fails = [];
@@ -826,7 +836,7 @@ $('#loadBtn').addEventListener('click', async () => {
   const btn = $('#loadBtn'), msg = $('#loadMsg');
   btn.disabled = true; msg.classList.remove('error');
   try {
-    const data = await downloadData(t => { msg.textContent = t; });
+    const data = (await bundledData(t => { msg.textContent = t; })) || await downloadData(t => { msg.textContent = t; });
     msg.textContent = `${nf0.format(data.ways.length)} Wegstücke gefunden. Speichere …`;
     await DB.set('data', data);
     await afterData(data);
@@ -857,6 +867,11 @@ $('#optTol').addEventListener('change', async e => { S.settings.tolerance = +e.t
 $('#optGoal').addEventListener('change', async e => { if (!e.target.value) return; S.settings.goal = e.target.value; await saveSettings(); renderSheet(); });
 $('#gpxInput').addEventListener('change', async e => { const f = [...e.target.files]; e.target.value = ''; if (f.length) await importGpx(f); });
 $('#exportBtn').addEventListener('click', exportBackup);
+$('#dataExportBtn').addEventListener('click', () => {
+  const blob = new Blob([JSON.stringify(S.data)], { type: 'application/json' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'wuerzburg.json';
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+});
 $('#importInput').addEventListener('change', async e => { const f = e.target.files[0]; e.target.value = ''; if (f) await importBackup(f); });
 $('#refreshBtn').addEventListener('click', async () => {
   if (S.walk) { toast('Erst den Spaziergang beenden.'); return; }
