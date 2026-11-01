@@ -170,17 +170,27 @@
     for (const lvl of Object.keys(data.levels)) levelPolys[lvl] = data.levels[lvl].map(d => new Poly(d.lines));
 
     const pieces = []; // {w, s, c, len, xy:Float64Array, cum:Float64Array, d9, d10, wi, k}
+    // Kreuzungspunkte: Knoten, die in mehreren Wegen vorkommen. Abschnitte enden immer an Kreuzungen,
+    // damit beim Abbiegen kein halb gelaufener Abschnitt über die Kreuzung hinausragt.
+    const vcount = new Map();
+    for (const w of data.ways) for (const q of w.g) { const key = q[0] + ',' + q[1]; vcount.set(key, (vcount.get(key) || 0) + 1); }
     data.ways.forEach((w, wi) => {
       const xy = w.g.map(p => fwd(p[0], p[1]));
       const cum = [0];
       for (let i = 1; i < xy.length; i++) cum.push(cum[i - 1] + Math.hypot(xy[i][0] - xy[i - 1][0], xy[i][1] - xy[i - 1][1]));
-      const L = cum[cum.length - 1];
-      if (L < 1) return;
-      const n = Math.max(1, Math.round(L / PIECE_LEN));
-      const step = L / n;
+      if (cum[cum.length - 1] < 1) return;
+      const cuts = [0];
+      for (let i = 1; i < xy.length - 1; i++) if (vcount.get(w.g[i][0] + ',' + w.g[i][1]) > 1 && cum[i] - cum[cuts[cuts.length - 1]] > 0.5) cuts.push(i);
+      if (cum[cum.length - 1] - cum[cuts[cuts.length - 1]] > 0.5 || cuts.length === 1) cuts.push(xy.length - 1); else cuts[cuts.length - 1] = xy.length - 1;
+      const ranges = [];
+      for (let r = 0; r + 1 < cuts.length; r++) {
+        const A = cum[cuts[r]], B = cum[cuts[r + 1]];
+        const n = Math.max(1, Math.round((B - A) / PIECE_LEN)), step = (B - A) / n;
+        for (let k = 0; k < n; k++) ranges.push([A + k * step, A + (k + 1) * step]);
+      }
       let vi = 0;
-      for (let k = 0; k < n; k++) {
-        const a = k * step, b = (k + 1) * step;
+      for (let k = 0; k < ranges.length; k++) {
+        const a = ranges[k][0], b = ranges[k][1];
         const at = d => {
           while (vi < cum.length - 2 && cum[vi + 1] < d) vi++;
           const seg = cum[vi + 1] - cum[vi];
@@ -198,7 +208,8 @@
         const len = c[c.length - 1];
         const mid = pointAt(flat, c, len / 2);
         if (!cityPoly.contains(mid[0], mid[1])) continue;
-        const p = { w: w.id, wi, k, s: w.s, c: w.c, len, xy: flat, cum: c, mx: mid[0], my: mid[1], d: {} };
+        const ex = flat[flat.length - 2] - flat[0], ey = flat[flat.length - 1] - flat[1], el = Math.hypot(ex, ey) || 1;
+        const p = { w: w.id, wi, k, s: w.s, c: w.c, len, xy: flat, cum: c, mx: mid[0], my: mid[1], ux: ex / el, uy: ey / el, d: {} };
         for (const lvl of Object.keys(levelPolys)) {
           p.d[lvl] = -1;
           const polys = levelPolys[lvl];
@@ -346,6 +357,14 @@
   }
 
   function isAdj(model, a, b) { return model.adj[a].includes(b); }
+  // Getrennte Richtungsfahrbahnen sind in OpenStreetMap gegenläufig gezeichnet, und bei Rechtsverkehr
+  // liegt die jeweils andere Fahrbahn links. Parallele Wege eines Platzes erfüllen das in aller Regel nicht.
+  function isDualPair(p, q) {
+    if (p.ux * q.ux + p.uy * q.uy > -0.7) return false;
+    const leftOfP = p.ux * (q.my - p.my) - p.uy * (q.mx - p.mx) > 0;
+    const leftOfQ = q.ux * (p.my - q.my) - q.uy * (p.mx - q.mx) > 0;
+    return leftOfP && leftOfQ;
+  }
   // gemeinsamer Punkt zweier benachbarter Abschnitte: [Position entlang a, Position entlang b]
   function sharedS(model, a, b) {
     const A = model.pieces[a], B = model.pieces[b];
@@ -415,15 +434,15 @@
             if (sh) { this._touch(this.prevState, sh[0], fresh); this._touch(st, sh[1], fresh); }
           } else {
             // Lücke über genau einen Abschnitt schließen
-            // (nur sehr kurze Abschnitte, die zwischen zwei Abtastpunkten liegen können)
+            // (z. B. wenn das GPS an einer Ecke abkürzt)
             const mid = twoHop(this.m, this.prevState, st);
-            if (mid >= 0 && this.m.pieces[mid].len <= 12) this._credit(mid, fresh);
+            if (mid >= 0) this._credit(mid, fresh);
           }
         }
-        // Gegenfahrbahn bzw. parallel verlaufende Teile derselben Straße
+        // Gegenfahrbahn derselben Straße (getrennte Richtungsfahrbahnen)
         for (const o of step.cands) {
           if (o.i === st || this.m.pieces[o.i].s !== p.s || o.d > this.cfg.tol * 1.5) continue;
-          if (o.ang == null || o.ang > 30) continue;
+          if (o.ang == null || o.ang > 30 || !isDualPair(p, this.m.pieces[o.i])) continue;
           this._touch(o.i, o.s, fresh);
         }
       }
