@@ -489,7 +489,7 @@ function initMap() {
     const n = nearestPiece(e.latlng.lat, e.latlng.lng, 30);
     if (!n) return;
     const p = S.model.pieces[n.i], st = S.model.data.streets[p.s];
-    const share = C.streetShare(S.stats, p.s);
+    const share = S.walk && S.stats.streetTot[p.s] ? Math.min(1, S.walk.liveDone[p.s] / S.stats.streetTot[p.s]) : C.streetShare(S.stats, p.s);
     const tot = S.stats.streetTot[p.s];
     L.popup({ closeButton: false, offset: [0, -4] }).setLatLng(e.latlng)
       .setContent(`<b>${esc(st.name)}</b>${tot ? fmtPct(share) + ' gelaufen · ' + fmtM(tot) : 'Fußweg (zählt gerade nicht)'}${share >= C.DONE_SHARE ? ' ✓' : ''}`).openOn(map);
@@ -624,7 +624,7 @@ function startWalk(resume) {
     before: S.visited.slice(),
     beforeStats: S.stats,
     liveDone: Float64Array.from(S.stats.streetDone),
-    matcher: new C.Matcher(S.model, S.visited, { tolerance: S.settings.tolerance }),
+    matcher: new C.LiveMatcher(S.model, S.visited, { tolerance: S.settings.tolerance }),
     newStreets: new Set(), buzzed: new Set(), lastStreet: null
   };
   // bereits aufgezeichnete Punkte (Fortsetzen) einspielen
@@ -656,7 +656,7 @@ function onPos(pos) {
     posDot = L.circleMarker(ll, { radius: 8, color: '#fff', weight: 3, fillColor: css('--track'), fillOpacity: 1, interactive: false }).addTo(map);
   } else { posDot.setLatLng(ll); accCircle.setLatLng(ll).setRadius(c.accuracy); }
   if (follow) map.setView(ll, Math.max(map.getZoom(), 16), { animate: true });
-  if (!r.accepted) { setSign(null, 'wait', `Ungenaues GPS (± ${Math.round(c.accuracy)} m)`); return; }
+  if (!r.accepted) { if (c.accuracy > 35) setSign(null, 'wait', `Ungenaues GPS (± ${Math.round(c.accuracy)} m)`); return; }
   W.rec.points.push(q);
   trackLine.addLatLng(ll);
   handleFresh(r.fresh, true);
@@ -723,7 +723,10 @@ async function stopWalk(silent) {
   $('#signWrap').hidden = true; $('#walkBar').hidden = true; $('#idleBar').hidden = false; $('#centerBtn').hidden = true;
   await DB.del('active');
   if (W.rec.points.length < 3) { refreshStats(); drawStreets(); if (!silent) toast('Zu kurz, nichts gespeichert.'); return; }
-  const track = { id: W.rec.id, start: W.rec.start, end: W.rec.points[W.rec.points.length - 1][2] || Date.now(), points: W.rec.points, source: 'live', distance: W.matcher.distance, _new: W.matcher.newPieces.slice() };
+  // Endgültige Auswertung über die ganze Spur (genauer als die Live-Zuordnung)
+  S.visited.set(W.before);
+  const fin = C.processTrack(S.model, S.visited, W.rec.points, { tolerance: S.settings.tolerance });
+  const track = { id: W.rec.id, start: W.rec.start, end: W.rec.points[W.rec.points.length - 1][2] || Date.now(), points: W.rec.points, source: 'live', distance: fin.distance, _new: fin.newPieces };
   S.tracks.push(track);
   await DB.putTrack(track);
   const beforeStats = W.beforeStats;

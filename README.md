@@ -27,7 +27,8 @@ Jede Straße in Würzburg einmal zu Fuß laufen. Die App zeichnet Spaziergänge 
 ## Regeln
 
 - Gezählt werden alle **benannten Straßen** im Stadtgebiet Würzburg aus OpenStreetMap, ohne Privatwege. Benannte Fußwege, Treppen und Pfade lassen sich in den Einstellungen dazuschalten.
-- Eine Straße ist in Abschnitte von etwa 20 m geteilt. Ein Abschnitt gilt als gelaufen, wenn du dich mindestens 10 m (bzw. 60 % seiner Länge) entlang bewegt hast, innerhalb der GPS-Toleranz (Standard 20 m). Nur über eine Kreuzung gehen zählt also nicht für die Querstraße.
+- Eine Straße ist in Abschnitte von etwa 20 m geteilt. Die App sucht den plausibelsten Weg durchs Straßennetz: nah an deiner GPS-Spur, passend zu deiner Laufrichtung und zusammenhängend über Kreuzungen. Gezählt wird nur, was auf diesem Weg liegt. An einer Einmündung vorbeigehen oder parallel zu einer Nachbarstraße laufen zählt also nicht. Bei getrennten Fahrbahnen derselben Straße zählen beide Seiten.
+- Nach dem Beenden wird der ganze Spaziergang noch einmal ausgewertet. Das Ergebnis kann daher minimal von der Live-Anzeige abweichen.
 - Eine Straße ist **fertig** ab 90 % ihrer Länge.
 
 ## Datenschutz

@@ -225,11 +225,23 @@
         }
     });
 
+    // Nachbarschaft: Abschnitte, die einen Punkt teilen (gleiche Straße weiter oder Kreuzung)
+    const vmap = new Map();
+    pieces.forEach((p, i) => {
+      for (let j = 0; j < p.xy.length; j += 2) {
+        const key = Math.round(p.xy[j] * 2) + ',' + Math.round(p.xy[j + 1] * 2);
+        let a = vmap.get(key); if (!a) vmap.set(key, a = []);
+        if (a[a.length - 1] !== i) a.push(i);
+      }
+    });
+    const adj = pieces.map(() => []);
+    for (const a of vmap.values()) if (a.length > 1) for (const i of a) for (const j of a) if (i !== j && !adj[i].includes(j)) adj[i].push(j);
+
     // Bezirksebene wählen: die mit Anzahl am nächsten an 13 (Würzburgs Stadtbezirke)
     const lvlKeys = Object.keys(data.levels).filter(k => data.levels[k].length > 1);
     lvlKeys.sort((a, b) => Math.abs(data.levels[a].length - 13) - Math.abs(data.levels[b].length - 13));
 
-    return { data, pieces, grid, cityPoly, defaultLevel: lvlKeys[0] || null, levelsAvailable: lvlKeys };
+    return { data, pieces, grid, adj, cityPoly, defaultLevel: lvlKeys[0] || null, levelsAvailable: lvlKeys };
   }
 
   function pointAt(flat, cum, d) {
@@ -243,9 +255,9 @@
     return [flat[0], flat[1]];
   }
 
-  // Abstand Punkt → Abschnitt, mit Position entlang des Abschnitts
+  // Abstand Punkt → Abschnitt: [Abstand, Position entlang, Richtung x, Richtung y] des nächsten Teilstücks
   function project(p, x, y) {
-    const f = p.xy; let best = Infinity, bestS = 0;
+    const f = p.xy; let best = Infinity, bestS = 0, ux = 1, uy = 0;
     for (let j = 0; j + 3 < f.length; j += 2) {
       const ax = f[j], ay = f[j + 1], bx = f[j + 2], by = f[j + 3];
       const dx = bx - ax, dy = by - ay; const l2 = dx * dx + dy * dy;
@@ -253,73 +265,240 @@
       t = t < 0 ? 0 : t > 1 ? 1 : t;
       const qx = ax + dx * t, qy = ay + dy * t;
       const d = Math.hypot(x - qx, y - qy);
-      if (d < best) { best = d; bestS = p.cum[j / 2] + Math.sqrt(l2) * t; }
+      if (d < best) { const l = Math.sqrt(l2); best = d; bestS = p.cum[j / 2] + l * t; if (l > 0) { ux = dx / l; uy = dy / l; } }
     }
-    return [best, bestS];
+    return [best, bestS, ux, uy];
   }
 
-  // ---------- Abgleich einer Spur (live oder nachträglich) ----------
-  class Matcher {
-    constructor(model, visited, opts) {
-      this.m = model; this.v = visited;
-      this.R = (opts && opts.tolerance) || 20;
-      this.maxAcc = (opts && opts.maxAccuracy) || 35;
-      this.span = new Map(); // piece -> [smin, smax]
-      this.prev = null;      // letzter akzeptierter Punkt {x,y,t}
-      this.anchor = null;    // Bezugspunkt für die Streckenlänge (glättet GPS-Zittern)
-      this.distance = 0;
-      this.newPieces = [];
+  // ---------- Abgleich einer Spur ----------
+  // 1. Die GPS-Spur wird geglättet und alle 5 m abgetastet.
+  // 2. Ein Hidden-Markov-Modell sucht die plausibelste Abfolge von Straßenabschnitten:
+  //    nah an der Spur, passend zur Laufrichtung und zusammenhängend über Kreuzungen.
+  //    Ein Zustand „abseits“ fängt Plätze, Parks und Hinterhöfe ab.
+  // 3. Gutgeschrieben wird nur, was auf diesem Weg liegt (plus die Gegenfahrbahn derselben Straße).
+  const STEP = 5;
+  const OFF = -1;
+
+  function settings(opts) {
+    const tol = (opts && opts.tolerance) || 20;
+    return {
+      tol,
+      sigma: tol / 2.8,                      // 20 m → σ ≈ 7 m
+      radius: Math.min(35, tol * 1.5),       // Suchradius für Kandidaten
+      maxAcc: (opts && opts.maxAccuracy) || 35,
+      angle0: 30,                            // Grad, Maß für die Richtungsstrafe
+      offEmit: -4.5, offTrans: -4,
+      tSame: 0, tAdjSame: -0.2, tAdjOther: -1.2, tTwoHop: -2.5, tJump: -12, tBreak: -1
+    };
+  }
+
+  class Resampler {
+    constructor(cfg) { this.cfg = cfg; this.prev = null; this.sm = null; this.last = null; this.anchor = null; this.distance = 0; }
+    // → null (Punkt verworfen) oder Liste neuer Abtastpunkte {x, y, t, brk}
+    add(lat, lon, t, acc) {
+      if (acc != null && acc > this.cfg.maxAcc) return null;
+      const [x, y] = fwd(lat, lon);
+      let gap = !this.prev;
+      if (this.prev) {
+        const d = Math.hypot(x - this.prev.x, y - this.prev.y);
+        const dt = (t != null && this.prev.t != null) ? (t - this.prev.t) / 1000 : null;
+        if (dt != null && dt > 0 && d / dt > 12 && d > 50) return null; // GPS-Sprung
+        if (d > 150 || (dt != null && dt > 180)) gap = true;
+      }
+      this.prev = { x, y, t };
+      if (gap || !this.sm) this.sm = { x, y };
+      else { this.sm = { x: this.sm.x + 0.35 * (x - this.sm.x), y: this.sm.y + 0.35 * (y - this.sm.y) }; }
+      const sm = this.sm;
+      if (gap || !this.anchor) this.anchor = { x: sm.x, y: sm.y };
+      else { const da = Math.hypot(sm.x - this.anchor.x, sm.y - this.anchor.y); if (da >= 10) { this.distance += da; this.anchor = { x: sm.x, y: sm.y }; } }
+      const out = [];
+      if (gap || !this.last) { this.last = { x: sm.x, y: sm.y }; out.push({ x: sm.x, y: sm.y, t, brk: true }); return out; }
+      let L = Math.hypot(sm.x - this.last.x, sm.y - this.last.y);
+      if (L >= STEP) {
+        const ux = (sm.x - this.last.x) / L, uy = (sm.y - this.last.y) / L;
+        while (L >= STEP) { this.last = { x: this.last.x + ux * STEP, y: this.last.y + uy * STEP }; out.push({ x: this.last.x, y: this.last.y, t, brk: false }); L -= STEP; }
+      }
+      return out;
     }
+  }
+
+  // Richtung eines Abtastpunkts aus seinen Nachbarn (back/fwd Schritte), null wenn unklar
+  function headingOf(samples, j, back, ahead) {
+    let a = j, b = j;
+    for (let k = 0; k < back && a > 0 && !samples[a].brk; k++) a--;
+    for (let k = 0; k < ahead && b < samples.length - 1 && !samples[b + 1].brk; k++) b++;
+    const hx = samples[b].x - samples[a].x, hy = samples[b].y - samples[a].y; const l = Math.hypot(hx, hy);
+    return l >= 8 ? [hx / l, hy / l] : null;
+  }
+
+  function candidatesAt(model, cfg, smp) {
+    const arr = model.grid.get(Math.floor(smp.x / CELL) * 100000 + Math.floor(smp.y / CELL));
+    const out = [];
+    if (!arr) return out;
+    for (const i of arr) {
+      const [d, s, ux, uy] = project(model.pieces[i], smp.x, smp.y);
+      if (d > cfg.radius) continue;
+      let ang = null, e = -0.5 * (d / cfg.sigma) ** 2;
+      if (smp.h) { ang = Math.acos(Math.min(1, Math.abs(smp.h[0] * ux + smp.h[1] * uy))) * 180 / Math.PI; e -= (ang / cfg.angle0) ** 2; }
+      out.push({ i, d, s, ang, e });
+    }
+    return out;
+  }
+
+  function isAdj(model, a, b) { return model.adj[a].includes(b); }
+  // gemeinsamer Punkt zweier benachbarter Abschnitte: [Position entlang a, Position entlang b]
+  function sharedS(model, a, b) {
+    const A = model.pieces[a], B = model.pieces[b];
+    for (let i = 0; i < A.xy.length; i += 2) {
+      const kx = Math.round(A.xy[i] * 2), ky = Math.round(A.xy[i + 1] * 2);
+      for (let j = 0; j < B.xy.length; j += 2) {
+        if (Math.round(B.xy[j] * 2) === kx && Math.round(B.xy[j + 1] * 2) === ky) return [A.cum[i / 2], B.cum[j / 2]];
+      }
+    }
+    return null;
+  }
+  function twoHop(model, a, b) { for (const x of model.adj[a]) if (model.adj[x].includes(b)) return x; return -1; }
+
+  function transition(model, cfg, a, b, brk) {
+    if (brk) return a === b ? 0 : cfg.tBreak;
+    if (a === OFF || b === OFF) return a === b ? 0 : cfg.offTrans;
+    if (a === b) return cfg.tSame;
+    const pa = model.pieces[a], pb = model.pieces[b];
+    if (isAdj(model, a, b)) return pa.s === pb.s ? cfg.tAdjSame : cfg.tAdjOther;
+    if (twoHop(model, a, b) >= 0) return cfg.tTwoHop;
+    return cfg.tJump;
+  }
+
+  // Viterbi-Schritt: liefert {states, cands, score, back}
+  function hmmStep(model, cfg, prev, smp) {
+    const cands = candidatesAt(model, cfg, smp);
+    const states = [OFF].concat(cands.map(c => c.i));
+    const emit = [cfg.offEmit].concat(cands.map(c => c.e));
+    const score = new Float64Array(states.length), back = new Int32Array(states.length);
+    for (let k = 0; k < states.length; k++) {
+      if (!prev) { score[k] = emit[k]; back[k] = -1; continue; }
+      let best = -Infinity, bi = 0;
+      for (let q = 0; q < prev.states.length; q++) {
+        const v = prev.score[q] + transition(model, cfg, prev.states[q], states[k], smp.brk);
+        if (v > best) { best = v; bi = q; }
+      }
+      score[k] = best + emit[k]; back[k] = bi;
+    }
+    // Normieren gegen Unterlauf
+    let mx = -Infinity; for (const v of score) if (v > mx) mx = v;
+    for (let k = 0; k < score.length; k++) score[k] -= mx;
+    return { smp, states, cands, score, back };
+  }
+
+  // Gutschrift entlang des gefundenen Wegs
+  class Creditor {
+    constructor(model, visited, cfg) { this.m = model; this.v = visited; this.cfg = cfg; this.span = new Map(); this.newPieces = []; this.prevState = OFF; }
+    _touch(i, s, fresh) {
+      if (this.v[i]) return;
+      let sp = this.span.get(i);
+      if (!sp) this.span.set(i, sp = [s, s]); else { if (s < sp[0]) sp[0] = s; if (s > sp[1]) sp[1] = s; }
+      const p = this.m.pieces[i];
+      if (sp[1] - sp[0] >= Math.min(10, 0.5 * p.len)) this._credit(i, fresh);
+    }
+    _credit(i, fresh) { if (this.v[i]) return; this.v[i] = 1; this.newPieces.push(i); fresh.push(i); this.span.delete(i); }
+    // step = Ergebnis von hmmStep, k = gewählter Zustand
+    add(step, k, fresh) {
+      const st = step.states[k];
+      if (st !== OFF) {
+        const c = step.cands[k - 1];
+        this._touch(st, c.s, fresh);
+        const p = this.m.pieces[st];
+        if (this.prevState !== OFF && this.prevState !== st && !step.smp.brk) {
+          if (isAdj(this.m, this.prevState, st)) {
+            // Übergang über den gemeinsamen Punkt: beide Abschnitte bis dorthin gelaufen
+            const sh = sharedS(this.m, this.prevState, st);
+            if (sh) { this._touch(this.prevState, sh[0], fresh); this._touch(st, sh[1], fresh); }
+          } else {
+            // Lücke über genau einen Abschnitt schließen
+            // (nur sehr kurze Abschnitte, die zwischen zwei Abtastpunkten liegen können)
+            const mid = twoHop(this.m, this.prevState, st);
+            if (mid >= 0 && this.m.pieces[mid].len <= 12) this._credit(mid, fresh);
+          }
+        }
+        // Gegenfahrbahn bzw. parallel verlaufende Teile derselben Straße
+        for (const o of step.cands) {
+          if (o.i === st || this.m.pieces[o.i].s !== p.s || o.d > this.cfg.tol * 1.5) continue;
+          if (o.ang == null || o.ang > 30) continue;
+          this._touch(o.i, o.s, fresh);
+        }
+      }
+      this.prevState = st;
+    }
+  }
+
+  // Nachträglicher Abgleich einer ganzen Spur (genaueste Variante)
+  function processTrack(model, visited, points, opts) {
+    const cfg = settings(opts);
+    const rs = new Resampler(cfg);
+    const samples = [];
+    for (const q of points) { const out = rs.add(q[0], q[1], q[2], q[3]); if (out) for (const s of out) samples.push(s); }
+    for (let j = 0; j < samples.length; j++) samples[j].h = headingOf(samples, j, 2, 2);
+    const steps = []; let prev = null;
+    for (const smp of samples) { prev = hmmStep(model, cfg, smp.brk ? (prev ? collapse(prev) : null) : prev, smp); steps.push(prev); }
+    const path = new Array(steps.length);
+    if (steps.length) {
+      let k = argmax(steps[steps.length - 1].score);
+      for (let j = steps.length - 1; j >= 0; j--) { path[j] = k; k = steps[j].back[k]; if (k < 0) k = 0; }
+    }
+    const cr = new Creditor(model, visited, cfg); const fresh = [];
+    for (let j = 0; j < steps.length; j++) cr.add(steps[j], path[j], fresh);
+    return { newPieces: cr.newPieces, distance: rs.distance, samples: samples.length, path: steps.map((s, j) => s.states[path[j]]) };
+  }
+  // nach einer Lücke: alter Weg endet im besten Zustand
+  function collapse(step) { const k = argmax(step.score); return { smp: step.smp, states: [step.states[k]], cands: [], score: new Float64Array([0]), back: new Int32Array([0]) }; }
+  function argmax(a) { let bi = 0; for (let k = 1; k < a.length; k++) if (a[k] > a[bi]) bi = k; return bi; }
+
+  // Live-Abgleich während des Spaziergangs: Entscheidung mit kurzer Verzögerung (LAG Abtastpunkte)
+  class LiveMatcher {
+    constructor(model, visited, opts) {
+      this.m = model; this.cfg = settings(opts);
+      this.rs = new Resampler(this.cfg);
+      this.cr = new Creditor(model, visited, this.cfg);
+      this.LAG = 5;
+      this.samples = []; this.steps = []; this.committed = 0;
+    }
+    get distance() { return this.rs.distance; }
+    get newPieces() { return this.cr.newPieces; }
     // liefert {accepted, nearest:{i,dist}|null, fresh:[pieceIdx]}
     add(lat, lon, t, acc) {
       const res = { accepted: false, nearest: null, fresh: [] };
-      if (acc != null && acc > this.maxAcc) return res;
-      const [x, y] = fwd(lat, lon);
-      const prev = this.prev;
-      if (prev) {
-        const d = Math.hypot(x - prev.x, y - prev.y);
-        const dt = (t != null && prev.t != null) ? (t - prev.t) / 1000 : null;
-        if (dt != null && dt > 0 && d / dt > 12 && d > 50) return res; // GPS-Sprung
-        if (d < 2) { // Stillstand: nur Status aktualisieren
-          res.accepted = true; res.nearest = this._match(x, y, res.fresh); return res;
-        }
-        if (d <= 150 && (dt == null || dt <= 180)) {
-          const steps = Math.floor(d / 4);
-          for (let k = 1; k < steps; k++) this._match(prev.x + (x - prev.x) * k / steps, prev.y + (y - prev.y) * k / steps, res.fresh);
-        }
-      }
-      res.nearest = this._match(x, y, res.fresh);
-      this.prev = { x, y, t };
-      const sm = this.smooth = this.smooth ? { x: this.smooth.x + 0.35 * (x - this.smooth.x), y: this.smooth.y + 0.35 * (y - this.smooth.y) } : { x, y };
-      if (!this.anchor) this.anchor = { x: sm.x, y: sm.y };
-      else { const da = Math.hypot(sm.x - this.anchor.x, sm.y - this.anchor.y); if (da >= 10) { this.distance += da; this.anchor = { x: sm.x, y: sm.y }; } }
+      const out = this.rs.add(lat, lon, t, acc);
+      if (!out) return res;
       res.accepted = true;
+      for (const smp of out) {
+        this.samples.push(smp);
+        const n = this.samples.length - 1;
+        smp.h = headingOf(this.samples, n, 3, 0);
+        const prev = this.steps.length ? this.steps[this.steps.length - 1] : null;
+        this.steps.push(hmmStep(this.m, this.cfg, smp.brk ? (prev ? collapse(prev) : null) : prev, smp));
+        this._commit(res.fresh, false);
+      }
+      const last = this.steps[this.steps.length - 1];
+      if (last) {
+        const k = argmax(last.score);
+        if (last.states[k] !== OFF) res.nearest = { i: last.states[k], dist: last.cands[k - 1].d };
+      }
       return res;
     }
-    _match(x, y, fresh) {
-      const arr = this.m.grid.get(Math.floor(x / CELL) * 100000 + Math.floor(y / CELL));
-      if (!arr) return null;
-      let near = null;
-      for (const i of arr) {
-        const p = this.m.pieces[i];
-        const [d, s] = project(p, x, y);
-        if (d > this.R) continue;
-        if (!near || d < near.dist) near = { i, dist: d };
-        if (this.v[i]) continue;
-        let sp = this.span.get(i);
-        if (!sp) this.span.set(i, sp = [s, s]); else { if (s < sp[0]) sp[0] = s; if (s > sp[1]) sp[1] = s; }
-        if (sp[1] - sp[0] >= Math.min(10, 0.6 * p.len)) {
-          this.v[i] = 1; this.newPieces.push(i); fresh.push(i); this.span.delete(i);
-        }
-      }
-      return near;
+    _commit(fresh, all) {
+      const n = this.steps.length - 1;
+      const upto = all ? n : n - this.LAG;
+      if (upto < this.committed) return;
+      // Rückverfolgung vom aktuell besten Zustand
+      let k = argmax(this.steps[n].score);
+      const path = [];
+      for (let j = n; j >= this.committed; j--) { path[j] = k; k = this.steps[j].back[k]; if (k < 0) k = 0; }
+      for (let j = this.committed; j <= upto; j++) this.cr.add(this.steps[j], path[j], fresh);
+      this.committed = upto + 1;
+      // Speicher begrenzen
+      if (this.committed > 200) { const cut = this.committed - 50; this.steps.splice(0, cut); this.samples.splice(0, cut); this.committed -= cut; }
     }
-  }
-
-  function processTrack(model, visited, points, opts) {
-    const mt = new Matcher(model, visited, opts);
-    for (const q of points) mt.add(q[0], q[1], q[2], q[3]);
-    return { newPieces: mt.newPieces, distance: mt.distance };
+    flush() { const fresh = []; if (this.steps.length) this._commit(fresh, true); return fresh; }
   }
 
   // ---------- Auswertung ----------
@@ -388,6 +567,6 @@
     return { name: nameM ? nameM[1].trim() : null, points: pts };
   }
 
-  const api = { fwd, inv, overpassQuery, compactFromOverpass, buildModel, Matcher, processTrack, computeStats, streetShare, parseGpx, project, Poly, DONE_SHARE, PIECE_LEN };
+  const api = { fwd, inv, overpassQuery, compactFromOverpass, buildModel, LiveMatcher, Matcher: LiveMatcher, processTrack, computeStats, streetShare, parseGpx, project, Poly, DONE_SHARE, PIECE_LEN };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.StreetCore = api;
 })(typeof self !== 'undefined' ? self : this);

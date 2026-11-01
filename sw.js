@@ -1,5 +1,5 @@
 // Straßenjagd – Service Worker: App offline verfügbar, Kartenkacheln zwischenspeichern
-const SHELL = 'shell-v3';
+const SHELL = 'shell-v4';
 const LIBS = 'libs-v1';
 const TILES = 'tiles-v2';
 const SHELL_FILES = ['./', './index.html', './core.js', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
